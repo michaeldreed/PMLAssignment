@@ -1,0 +1,200 @@
+Using Random Forests to Predict Dumbell Curl Technique from On-Body Sensors
+========================================================
+
+## Synopsis
+
+This report describes the process of taking raw data from on-body sensors and building a classification model to predict _"how well"_ a sporting exercise is performed. The data contained acceleration and gyroscopic data from sensors placed at different points on the body of participants who performed a dumbell curl using five different techniques (one technique being correct and the other four being incorrect, representing common weightlifting mistakes).
+
+After performing some exploratory analysis the raw data was pre-processed using techniques such as normalisation and variables with missing values were removed, leaving a dataset containing only those variables/predictors which best represented the variance in the data. Principal Component Analysis was then performed on the data to select only the predictors which represented the most of the variance in the data to use for prediction. 
+
+After splitting the data into a training and cross validation set, a Random Forest model was built on the training data using the principal components identified previously. 
+
+_The resulting random forest has a prediction accuracy of 97% which gives an out of sample error of 3%_
+
+### The Data
+The data comes from the "Weight Lifting Exercise" from the following project:
+
+http://groupware.les.inf.puc-rio.br/har
+
+In the project six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E).
+
+On-Body sensors were placed on the arm, forearm, belt and on the dumbell which recorded metrics such as acceleration (X,Y,Z), yaw, pitch, roll etc. 
+
+---------------------------
+
+## Load the data
+
+```{r setoptions, echo=FALSE}
+opts_chunk$set(echo=TRUE)
+```
+
+First we load the training data as a data frame and the necessary libraries. The _caret_ package was used for preprocessing the data and the _kernlab_ and _randomForest_ packages for building and training the model. 
+
+```{r, message=FALSE}
+library(caret)
+library(randomForest)
+library(kernlab)
+data<-read.csv("pml-training.csv")
+```
+
+---------------------------
+
+## Pre-Processing
+
+Before looking at the data it is worth checking if there is any variables with missing data. 
+
+```{r}
+numNas<-colSums(is.na(data))
+table(numNas)
+```
+
+Here we can see that there are 67 columns which have missing values (NAs) of which they all have the same number of missing values. Since they all have the same number of missing values this this suggests that the missing values are a result of the equipment/sensors used and, because there are so many missing values (19216), it is not worth trying to impute them.
+
+Therefore we just remove these values
+
+```{r}
+data<-data[numNas == 0]
+```
+
+Next, it is a good idea to start by looking at the data:
+
+```{r}
+str(data)
+```
+
+From this there are a few variables to pick out:
+
+* An "X" variable seems to be an id variable and therefore would be different for each observation and add nothing to the model. This should be removed.
+* A factor "user_name" variable which represents the name of the participant.
+* A "cvtd_timestamp" variable which represents the date and time.
+* Also the timestamp seems to have been split into two variables "rawtimestamppart1" and "rawtimestamppart1".
+
+### Cleaning data
+
+First things first lets turn the factor "username" variables to quantitative indicator values using dummy variables. Factor variables such as this, where the values are just a set of characters, make it difficult for prediction algorithms to use them qualitiatively, and some even won't work unless all data is numeric. To turn these factor variables into quantitative variables the model can use we use the _dummyVars_ function in the caret package. 
+
+```{r}
+nameDummies<-dummyVars(X ~ user_name, data = data)
+data <- cbind(predict(nameDummies, newdata = data), data)
+data <- data[,-(which(names(data) == "user_name"))] # remove user_name variable
+```
+
+Now lets look at the timestamp variable. A variables such as this whereby the values are split into two variables won't add anything to the model because, in this example, the first part of the timestamp will be the same for many of the observations. Therefore we need to combine the two timestamp variables into a single value and remove the old values:
+
+```{r}
+timestamp<-paste(data$raw_timestamp_part_1, data$raw_timestamp_part_2)
+timestamp<-as.numeric(gsub(" ", "", timestamp))
+data<-cbind(timestamp, data)
+
+# remove old timestamp variables
+data <- data[,-(which(names(data) == "raw_timestamp_part_1"))] 
+data <- data[,-(which(names(data) == "raw_timestamp_part_2"))]
+data <- data[,-(which(names(data) == "cvtd_timestamp"))]
+```
+
+Now lets see which variables are least useful using Near Zero Variables, specifically the _nearZeroVar_ function in the caret package:
+```{r}
+nzv<-nearZeroVar(data, saveMetrics=TRUE)
+nzv[which(nzv$nzv == TRUE),] # Only show which ones are true
+```
+
+From this we can see that there are some variables which have very little or no variance and would not be of any benefit to the model as they would not be very good predictors. So lets remove these along with the "X" variables:
+
+```{r}
+data<-data[,which(nzv$nzv == FALSE)]
+data<-data[-8]
+```
+
+### Normalising
+
+The next step is to normalise the data; often data can be skewed which makes building a model very difficult. Particularly for PCA it is necessary to centre the data first. For example, looking at the histograms of some of the gyroscope variables in the plot below it is clear that some are very skewed, particularly for sensors on the forearm and dumbbell, therefore we centre and scale the data:
+
+```{r}
+par(mfrow=c(4,3))
+hist(data$gyros_belt_x, main = "gyros_belt_x", xlab = "gyros_belt_x", col = "blue")
+hist(data$gyros_belt_y, main = "gyros_belt_y", xlab = "gyros_belt_y", col = "blue")
+hist(data$gyros_belt_z, main = "gyros_belt_z", xlab = "gyros_belt_z", col = "blue")
+hist(data$gyros_arm_x, main = "gyros_arm_x", xlab = "gyros_arm_x", col = "red")
+hist(data$gyros_arm_y, main = "gyros_arm_y", xlab = "gyros_arm_y", col = "red")
+hist(data$gyros_arm_z, main = "gyros_arm_z", xlab = "gyros_arm_z", col = "red")
+hist(data$gyros_forearm_x, main = "gyros_forearm_x", xlab = "gyros_forearm_x", col = "green")
+hist(data$gyros_forearm_y, main = "gyros_forearm_y", xlab = "gyros_forearm_y", col = "green")
+hist(data$gyros_forearm_z, main = "gyros_forearm_z", xlab = "gyros_forearm_z", col = "green")
+hist(data$gyros_dumbbell_x, main = "gyros_dumbbell_x", xlab = "gyros_dumbbell_x")
+hist(data$gyros_dumbbell_y, main = "gyros_dumbbell_y", xlab = "gyros_dumbbell_y")
+hist(data$gyros_dumbbell_z, main = "gyros_dumbbell_z", xlab = "gyros_dumbbell_z")
+```
+
+```{r}
+standardData<-preProcess(data[,-61], method = c("center","scale"))
+classe<-data[,61]
+data<-cbind(predict(standardData, data[,-61]), classe)
+```
+
+---------------------------
+
+## Classification
+
+### Cross Validation
+In order to test the model we create we first need to split the training data into a training and cross validation set. It is important to select a random sample of the data to be the training set so that each of the classes is well represented. 
+
+Here we create a random sampled partition in the data that represents 50% of the training set:
+
+```{r}
+folds <- createDataPartition(y = data$classe, times = 1, p = 0.5,list = TRUE)
+training<-data[folds[[1]],]
+testing<-data[-folds[[1]],]
+```
+
+### Principal Componant Analysis
+
+The idea of Principal Component Analysis (PCA) is to pick a weighted selection of the multivariate predictors in the dataset such that the combination of these weighted predictors represents the most information possible. PCA is a useful technique for reducing the dimensionality of the data by reducing the number of predictors but also for removing noise. 
+
+Therefore we apply PCA to calculate the predictors which retain the most variance. Here we have selected the predictors which retain 99% of the variance:
+
+```{r}
+preProc <- preProcess(training[-61], method='pca', thresh=0.99)
+training.pca <- predict(preProc, training[,-61])
+```
+
+### Random Forest
+
+_Random Forests_, essentially a collection of decision trees, is a widely used technique for classification and is known as being the most accurate. 
+
+A _Decision Tree_ works by iteratively splitting the varibales into groups, evaluating the homogenaity within the group and then splitting again, until you are left with groups of similar variables which are small and "pure".
+
+Random Forests works by first taking boostrap samples from the data, and then for each sample build a decision tree classify the data. The slight difference being that at each split on the tree, we again boostrap the variables, so only a sample of the variables are considered at each potential split. The idea is then to grow a large number of trees, and then vote on which tree provides the best prediction for the outcome. 
+
+So here we use the new training data containing the best predictors (from PCA) to build a random forest classification model:
+
+```{r}
+modelFit <- train(training$classe ~ ., data=training.pca, method='rf')
+```
+
+---------------------------
+
+## Results
+
+### Cross Validation
+
+In order to test the model we need to apply the same pre-processing (PCA) to the cross validation set and use the random forest model to predict the "classe" variable:
+```{r}
+# Apply the same pre-processing to the training set and use the 
+# random forest model to predict the classe variable in the test set 
+testing.pca <- predict(preProc, testing[-61])
+predictions <- predict(modelFit, testing.pca)
+
+# Use a confusion matrix to visualise how good the model is
+confusionMatrix(testing$classe, predictions)
+```
+
+### Out Of Sample Error
+
+Looking at the Confusion Matrix (another function from the caret package) we can see how well the model predicts the classes in the cross validation set. 
+
+Overall we can see that the model has an average Sensitivity of 0.98 across all of the classes and an average Specificity of 0.99. 
+
+__The overall accuracy of the model is 97% which gives an out of sample error of 3%.__
+
+
+
